@@ -529,11 +529,9 @@ HAIRSTYLE_CATALOG = {
 
 async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: str):
     """
-    Transfer hairstyle using free AI APIs.
-    Tries multiple services for reliability:
-    1. HairFastGAN via Hugging Face (primary)
-    2. Fal.ai hair transfer (backup)
-    3. Image-to-image with hairstyle prompt (fallback)
+    Transfer hairstyle using local processing.
+    External AI APIs (HairFastGAN, Stable-Hair) are too slow/unreliable,
+    so we use fast local hair enhancement as the primary method.
     """
     import os
     import tempfile
@@ -544,31 +542,16 @@ async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: st
     if not hairstyle:
         return None, "Unknown hairstyle ID"
     
-    # Try HairFastGAN via Gradio Client (free, no API key)
-    try:
-        result = await try_hairfastgan_transfer(source_image_bytes, hairstyle)
-        if result:
-            return result, None
-    except Exception as e:
-        print(f"HairFastGAN failed: {e}")
-    
-    # Try alternative: Stable-Hair or similar
-    try:
-        result = await try_stable_hair_transfer(source_image_bytes, hairstyle)
-        if result:
-            return result, None
-    except Exception as e:
-        print(f"Stable-Hair failed: {e}")
-    
-    # Final fallback: Apply hair color/style tint locally
+    # Use fast local processing (primary method)
+    # This applies hair enhancement effects based on the selected style
     try:
         result = apply_hairstyle_effect_local(source_image_bytes, hairstyle)
         if result:
             return result, None
     except Exception as e:
-        print(f"Local fallback failed: {e}")
+        print(f"Local processing failed: {e}")
     
-    return None, "All hairstyle transfer methods failed. Please try again later."
+    return None, "Failed to apply hairstyle. Please try again."
 
 
 async def try_hairfastgan_transfer(source_image_bytes: bytes, hairstyle: dict):
