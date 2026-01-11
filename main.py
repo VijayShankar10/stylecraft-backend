@@ -619,58 +619,102 @@ def create_fallback_hair_mask(pil_image):
 
 async def try_huggingface_inpainting(pil_image, hair_mask, hairstyle):
     """
-    Use Hugging Face's FREE Inference API for Stable Diffusion Inpainting.
-    Free tier: ~1000 requests/day
+    Use Hugging Face's FREE Inference API for AI hairstyle transfer.
+    
+    To enable: Set HUGGINGFACE_API_TOKEN environment variable on Render
+    Get your free token at: https://huggingface.co/settings/tokens
     """
     import httpx
     import base64
     
-    # Hugging Face Inference API endpoint for inpainting
-    API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
+    # Get API token from environment (set this on Render dashboard)
+    HF_TOKEN = os.environ.get("HUGGINGFACE_API_TOKEN", os.environ.get("HF_TOKEN", ""))
     
-    # You can use without API key for limited requests, or add your free HF token
+    if not HF_TOKEN:
+        print("No HuggingFace API token found. Set HUGGINGFACE_API_TOKEN env variable.")
+        print("Get your FREE token at: https://huggingface.co/settings/tokens")
+        return None
+    
+    # Models to try (in order of preference)
+    models = [
+        "stabilityai/stable-diffusion-2-inpainting",
+        "runwayml/stable-diffusion-inpainting",
+    ]
+    
     headers = {
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {HF_TOKEN}",
     }
     
     try:
-        # Convert image to base64
+        # Prepare images
+        # For HF inpainting, we need to send image and mask together
+        
+        # Convert source image to bytes
         img_buffer = io.BytesIO()
         pil_image.save(img_buffer, format="PNG")
-        img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
+        img_bytes = img_buffer.getvalue()
         
-        # Convert mask to base64 (white = inpaint, black = keep)
-        mask_img = Image.fromarray(hair_mask)
+        # Create mask image (white = inpaint, black = keep)
+        mask_pil = Image.fromarray(hair_mask).convert('RGB')
         mask_buffer = io.BytesIO()
-        mask_img.save(mask_buffer, format="PNG")
-        mask_base64 = base64.b64encode(mask_buffer.getvalue()).decode()
+        mask_pil.save(mask_buffer, format="PNG")
+        mask_bytes = mask_buffer.getvalue()
         
-        # Create the inpainting prompt
-        prompt = f"{hairstyle['prompt']}, professional photo, highly detailed, natural lighting"
+        # Create the hairstyle prompt
+        prompt = f"{hairstyle['prompt']}, photorealistic, natural hair, detailed"
         
-        print(f"Sending to HuggingFace with prompt: {prompt[:50]}...")
+        print(f"Sending to HuggingFace: {prompt[:60]}...")
         
-        payload = {
-            "inputs": {
-                "image": img_base64,
-                "mask": mask_base64,
-                "prompt": prompt,
-                "negative_prompt": "blurry, distorted, ugly, low quality, bad hair"
-            }
-        }
-        
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(API_URL, headers=headers, json=payload)
+        for model in models:
+            API_URL = f"https://api-inference.huggingface.co/models/{model}"
             
-            if response.status_code == 200:
-                # Response is the image bytes directly
-                return response.content
-            else:
-                print(f"HuggingFace API error: {response.status_code} - {response.text[:200]}")
-                return None
-                
+            try:
+                # HuggingFace inpainting API expects multipart form data
+                async with httpx.AsyncClient(timeout=90.0) as client:
+                    # Try the inpainting endpoint format
+                    files = {
+                        "inputs": (None, prompt),
+                        "image": ("image.png", img_bytes, "image/png"),
+                        "mask": ("mask.png", mask_bytes, "image/png"),
+                    }
+                    
+                    response = await client.post(
+                        API_URL,
+                        headers=headers,
+                        files=files
+                    )
+                    
+                    if response.status_code == 200:
+                        # Check if response is image
+                        content_type = response.headers.get("content-type", "")
+                        if "image" in content_type:
+                            print(f"Success with model: {model}")
+                            return response.content
+                        else:
+                            # Maybe JSON response with error
+                            print(f"Unexpected response: {response.text[:200]}")
+                            
+                    elif response.status_code == 503:
+                        # Model loading, wait and retry
+                        print(f"Model {model} is loading, trying next...")
+                        continue
+                    else:
+                        print(f"HF API error ({model}): {response.status_code}")
+                        continue
+                        
+            except httpx.TimeoutException:
+                print(f"Timeout on model {model}")
+                continue
+            except Exception as e:
+                print(f"Error with model {model}: {e}")
+                continue
+        
+        return None
+        
     except Exception as e:
         print(f"HuggingFace inpainting failed: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
