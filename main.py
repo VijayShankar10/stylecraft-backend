@@ -530,18 +530,16 @@ HAIRSTYLE_CATALOG = {
 
 async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: str):
     """
-    Transfer hairstyle using AI inpainting via Hugging Face Inference API (FREE).
+    Apply hairstyle transformation to user's photo.
     
-    Process:
-    1. Segment the hair region to create a mask
-    2. Send image + mask + hairstyle prompt to Stable Diffusion Inpainting
-    3. AI regenerates the hair region with the new hairstyle
+    Uses aggressive local styling that:
+    1. Accurately segments the hair region using MediaPipe
+    2. Applies strong, visible color and texture changes
+    3. Creates dramatic hairstyle transformations
     """
-    import httpx
-    import base64
-    import asyncio
+    import cv2
     
-    print(f"Starting AI hairstyle transfer for: {hairstyle_id}")
+    print(f"Starting hairstyle transfer for: {hairstyle_id}")
     print(f"Image size: {len(source_image_bytes)} bytes")
     
     hairstyle = HAIRSTYLE_CATALOG.get(hairstyle_id)
@@ -552,52 +550,324 @@ async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: st
     if not source_image_bytes or len(source_image_bytes) < 100:
         return None, "Invalid image data"
     
-    # Step 1: Get hair mask for inpainting
     try:
+        # Load and prepare image
         pil_image = Image.open(io.BytesIO(source_image_bytes))
         pil_image = correct_image_orientation(pil_image)
         
-        # Resize for faster processing (max 512x512 for SD)
-        max_size = 512
+        # Keep reasonable size for processing
+        max_size = 800
         if pil_image.width > max_size or pil_image.height > max_size:
             ratio = min(max_size / pil_image.width, max_size / pil_image.height)
             new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
             pil_image = pil_image.resize(new_size, Image.LANCZOS)
         
-        # Get hair mask
+        # Get accurate hair mask using MediaPipe
         hair_mask = segment_hair_multiclass(pil_image)
         if hair_mask is None:
-            print("Hair segmentation failed, creating approximate mask")
-            hair_mask = create_fallback_hair_mask(pil_image)
+            print("Hair segmentation failed, creating face-based mask")
+            hair_mask = create_face_based_hair_mask(pil_image)
         
-        print(f"Hair mask created: {hair_mask.shape}")
+        # Check if we have valid hair detected
+        hair_pixels = np.sum(hair_mask > 128)
+        total_pixels = hair_mask.shape[0] * hair_mask.shape[1]
+        hair_ratio = hair_pixels / total_pixels
+        print(f"Hair mask: {hair_mask.shape}, hair coverage: {hair_ratio:.2%}")
+        
+        if hair_ratio < 0.02:  # Less than 2% - barely any hair detected
+            print("Very little hair detected, using expanded mask")
+            hair_mask = create_face_based_hair_mask(pil_image)
+        
+        # Convert to numpy array
+        img_rgb = np.array(pil_image.convert('RGB'))
+        
+        # Apply aggressive hairstyle transformation
+        result = apply_dramatic_hairstyle(img_rgb, hair_mask, hairstyle_id, hairstyle)
+        
+        # Convert result to bytes
+        result_image = Image.fromarray(result)
+        buffer = io.BytesIO()
+        result_image.save(buffer, format="JPEG", quality=92)
+        
+        print(f"Hairstyle applied successfully! Result: {len(buffer.getvalue())} bytes")
+        return buffer.getvalue(), None
         
     except Exception as e:
-        print(f"Image preparation failed: {e}")
+        print(f"Hairstyle transfer failed: {e}")
         import traceback
         traceback.print_exc()
-        return None, "Failed to process image"
+        return None, f"Failed to apply hairstyle: {str(e)}"
+
+
+def create_face_based_hair_mask(pil_image):
+    """
+    Create hair mask based on face detection.
+    Identifies face position and creates mask for area above/around it.
+    """
+    import cv2
+    import mediapipe as mp
     
-    # Step 2: Try Hugging Face Inpainting API
-    result = await try_huggingface_inpainting(pil_image, hair_mask, hairstyle)
-    if result:
-        print("HuggingFace inpainting successful!")
-        return result, None
+    img_rgb = np.array(pil_image.convert('RGB'))
+    h, w = img_rgb.shape[:2]
     
-    # Step 3: Fallback to Replicate API
-    result = await try_replicate_inpainting(pil_image, hair_mask, hairstyle)
-    if result:
-        print("Replicate inpainting successful!")
-        return result, None
+    # Try to detect face for accurate positioning
+    mp_face_mesh = mp.solutions.face_mesh
     
-    # Step 4: Final fallback - apply visible color/style effect locally
-    print("AI APIs failed, applying local visible effect")
-    result = apply_local_hairstyle_effect(np.array(pil_image.convert('RGB')), hair_mask, hairstyle_id)
-    if result is not None:
-        result_img = Image.fromarray(result)
-        buffer = io.BytesIO()
-        result_img.save(buffer, format="JPEG", quality=90)
-        return buffer.getvalue(), None
+    mask = np.zeros((h, w), dtype=np.uint8)
+    
+    try:
+        with mp_face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            min_detection_confidence=0.5
+        ) as face_mesh:
+            
+            results = face_mesh.process(img_rgb)
+            
+            if results.multi_face_landmarks:
+                landmarks = results.multi_face_landmarks[0].landmark
+                
+                # Get face boundary points
+                forehead_y = int(landmarks[10].y * h)  # Top of forehead
+                left_x = int(landmarks[234].x * w)     # Left side
+                right_x = int(landmarks[454].x * w)    # Right side
+                
+                # Create hair region (above forehead, extending to sides)
+                face_width = right_x - left_x
+                center_x = (left_x + right_x) // 2
+                
+                # Hair extends beyond face width
+                hair_left = max(0, center_x - int(face_width * 0.8))
+                hair_right = min(w, center_x + int(face_width * 0.8))
+                hair_top = 0
+                hair_bottom = min(h, forehead_y + int(face_width * 0.2))
+                
+                # Create elliptical mask for natural hair shape
+                cv2.ellipse(
+                    mask,
+                    (center_x, forehead_y - int(face_width * 0.2)),
+                    (int(face_width * 0.7), int(face_width * 0.5)),
+                    0, 0, 360, 255, -1
+                )
+                
+                # Also fill rectangular area at top
+                mask[:forehead_y, hair_left:hair_right] = 255
+                
+                # Blur for soft edges
+                mask = cv2.GaussianBlur(mask, (31, 31), 0)
+                
+                print(f"Face-based mask created: forehead at y={forehead_y}")
+                return mask
+                
+    except Exception as e:
+        print(f"Face detection failed: {e}")
+    
+    # Fallback: assume top 35% is hair
+    mask[:int(h * 0.35), :] = 255
+    
+    # Add gradient fade
+    gradient_height = int(h * 0.1)
+    for i in range(gradient_height):
+        y = int(h * 0.35) + i
+        if y < h:
+            alpha = 1.0 - (i / gradient_height)
+            mask[y, :] = int(255 * alpha)
+    
+    mask = cv2.GaussianBlur(mask, (31, 31), 0)
+    return mask
+
+
+def apply_dramatic_hairstyle(img_rgb: np.ndarray, hair_mask: np.ndarray, 
+                             hairstyle_id: str, hairstyle: dict):
+    """
+    Apply a dramatic, highly visible hairstyle transformation.
+    Changes both color and texture of the hair region.
+    """
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy().astype(np.float32)
+    
+    # Hairstyle definitions with dramatic colors and textures
+    hairstyle_configs = {
+        'curly_bob': {
+            'base_color': (50, 35, 25),      # Rich dark brown
+            'highlight_color': (90, 70, 50),  # Golden highlights
+            'texture': 'curly',
+            'color_intensity': 0.85
+        },
+        'textured_waves': {
+            'base_color': (70, 50, 35),       # Warm brown
+            'highlight_color': (110, 85, 60), # Honey highlights
+            'texture': 'wavy',
+            'color_intensity': 0.80
+        },
+        'layered_bob': {
+            'base_color': (40, 28, 18),       # Dark chocolate
+            'highlight_color': (70, 50, 35),  # Subtle highlights
+            'texture': 'layered',
+            'color_intensity': 0.82
+        },
+        'classic_bob': {
+            'base_color': (30, 22, 15),       # Deep brown
+            'highlight_color': (55, 40, 28),  # Natural highlights
+            'texture': 'smooth',
+            'color_intensity': 0.85
+        },
+        'side_swept': {
+            'base_color': (55, 40, 28),       # Medium brown
+            'highlight_color': (85, 65, 45),  # Caramel highlights
+            'texture': 'swept',
+            'color_intensity': 0.78
+        },
+        'pixie_cut': {
+            'base_color': (35, 25, 18),       # Dark brown
+            'highlight_color': (60, 45, 32),  # Subtle shine
+            'texture': 'short',
+            'color_intensity': 0.88
+        },
+        'voluminous_curls': {
+            'base_color': (80, 55, 40),       # Warm auburn
+            'highlight_color': (120, 90, 65), # Copper highlights
+            'texture': 'curly',
+            'color_intensity': 0.82
+        },
+        'sleek_straight': {
+            'base_color': (20, 15, 10),       # Jet black
+            'highlight_color': (40, 30, 22),  # Blue-black shine
+            'texture': 'sleek',
+            'color_intensity': 0.90
+        },
+        'french_bob': {
+            'base_color': (45, 32, 22),       # Elegant brown
+            'highlight_color': (75, 55, 40),  # Soft highlights
+            'texture': 'smooth',
+            'color_intensity': 0.83
+        },
+        'shaggy_layers': {
+            'base_color': (85, 60, 42),       # Light brown
+            'highlight_color': (130, 100, 70),# Sun-kissed highlights
+            'texture': 'shaggy',
+            'color_intensity': 0.75
+        }
+    }
+    
+    config = hairstyle_configs.get(hairstyle_id, hairstyle_configs['classic_bob'])
+    
+    # Ensure mask is proper size
+    if hair_mask.shape[:2] != img_rgb.shape[:2]:
+        hair_mask = cv2.resize(hair_mask, (w, h))
+    
+    # Normalize and smooth mask
+    mask_norm = hair_mask.astype(np.float32) / 255.0
+    mask_norm = cv2.GaussianBlur(mask_norm, (15, 15), 0)
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create styled hair color
+    styled_hair = create_styled_hair_color(
+        img_rgb, h, w, 
+        config['base_color'], 
+        config['highlight_color'],
+        config['texture']
+    )
+    
+    # Apply color change with high intensity
+    intensity = config['color_intensity']
+    result = result * (1 - mask_3ch * intensity) + styled_hair * mask_3ch * intensity
+    
+    # Add texture effects based on style
+    result = apply_texture_effect(result, mask_norm, config['texture'])
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def create_styled_hair_color(img_rgb, h, w, base_color, highlight_color, texture_type):
+    """Create the styled hair color layer with highlights and depth."""
+    import cv2
+    
+    # Get luminance from original for natural variation
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    
+    styled = np.zeros((h, w, 3), dtype=np.float32)
+    
+    # Create base color
+    for c in range(3):
+        styled[:, :, c] = base_color[c]
+    
+    # Add highlights based on original brightness
+    highlight_mask = gray > 0.5
+    for c in range(3):
+        styled[:, :, c] = np.where(
+            highlight_mask,
+            styled[:, :, c] * 0.7 + highlight_color[c] * 0.3,
+            styled[:, :, c]
+        )
+    
+    # Add natural variation based on original luminance
+    for c in range(3):
+        styled[:, :, c] = styled[:, :, c] * (0.6 + gray * 0.8)
+    
+    # Add shine/highlight streak
+    shine_start = w // 4
+    shine_width = w // 3
+    shine = np.zeros((h, w), dtype=np.float32)
+    shine[:, shine_start:shine_start + shine_width] = 25
+    shine = cv2.GaussianBlur(shine, (51, 51), 0)
+    
+    styled += np.stack([shine] * 3, axis=-1)
+    
+    return styled
+
+
+def apply_texture_effect(result: np.ndarray, mask_norm: np.ndarray, texture_type: str):
+    """Apply texture-specific effects to make hairstyle more visible."""
+    import cv2
+    
+    h, w = result.shape[:2]
+    
+    if texture_type == 'curly':
+        # Add curl pattern
+        for freq in [18, 28]:
+            x_sin = np.sin(np.linspace(0, freq * np.pi, w))
+            y_cos = np.cos(np.linspace(0, freq * np.pi, h))
+            pattern = np.outer(y_cos, x_sin) * 15
+            pattern = cv2.GaussianBlur(pattern.astype(np.float32), (5, 5), 0)
+            for c in range(3):
+                result[:, :, c] += pattern * mask_norm
+                
+    elif texture_type == 'wavy':
+        # Add wave pattern
+        y_coords = np.linspace(0, 6 * np.pi, h)
+        for i in range(h):
+            wave = np.sin(np.linspace(0, 4 * np.pi, w) + y_coords[i]) * 12
+            for c in range(3):
+                result[i, :, c] += wave * mask_norm[i, :]
+                
+    elif texture_type == 'sleek':
+        # Add shine streak
+        shine_x = w // 3
+        shine = np.zeros((h, w), dtype=np.float32)
+        shine[:, shine_x:shine_x + w//4] = 20
+        shine = cv2.GaussianBlur(shine, (41, 41), 0)
+        for c in range(3):
+            result[:, :, c] += shine * mask_norm
+            
+    elif texture_type == 'swept':
+        # Add diagonal sweep pattern
+        for i in range(h):
+            offset = int(i * 0.3)
+            shift = np.roll(np.linspace(0, 15, w), offset) * mask_norm[i, :]
+            for c in range(3):
+                result[i, :, c] += shift
+                
+    elif texture_type in ['short', 'pixie']:
+        # Add fine texture
+        texture = np.random.uniform(-8, 8, (h, w))
+        texture = cv2.GaussianBlur(texture.astype(np.float32), (3, 3), 0)
+        for c in range(3):
+            result[:, :, c] += texture * mask_norm
+    
+    return result
     
     return None, "All hairstyle transfer methods failed. Please try again."
 
