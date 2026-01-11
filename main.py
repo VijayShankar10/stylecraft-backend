@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, Response
 from PIL import Image
 from PIL import ExifTags
 import io
+import os
 import base64
 import numpy as np
 
