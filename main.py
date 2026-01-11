@@ -538,18 +538,31 @@ async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: st
     import asyncio
     from concurrent.futures import ThreadPoolExecutor
     
+    print(f"Starting hairstyle transfer for: {hairstyle_id}")
+    print(f"Image size: {len(source_image_bytes)} bytes")
+    
     hairstyle = HAIRSTYLE_CATALOG.get(hairstyle_id)
     if not hairstyle:
-        return None, "Unknown hairstyle ID"
+        return None, f"Unknown hairstyle ID: {hairstyle_id}"
+    
+    # Validate image bytes
+    if not source_image_bytes or len(source_image_bytes) < 100:
+        return None, "Invalid image data received"
     
     # Use fast local processing (primary method)
     # This applies hair enhancement effects based on the selected style
     try:
+        print(f"Applying local processing for style: {hairstyle['name']}")
         result = apply_hairstyle_effect_local(source_image_bytes, hairstyle)
         if result:
+            print(f"Success! Result size: {len(result)} bytes")
             return result, None
+        else:
+            print("Local processing returned None")
     except Exception as e:
+        import traceback
         print(f"Local processing failed: {e}")
+        traceback.print_exc()
     
     return None, "Failed to apply hairstyle. Please try again."
 
