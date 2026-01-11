@@ -650,26 +650,49 @@ async def try_hairfastgan_with_reference(source_image, hairstyle: dict):
             # Connect to HairFastGAN on Hugging Face Spaces
             client = Client("AIRI-Institute/HairFastGAN")
             
-            # HairFastGAN expects: source_image, hairstyle_reference, color_reference
-            # We use the same reference for both hairstyle and color
-            result = client.predict(
-                handle_file(src_path),   # Source face
-                handle_file(ref_path),   # Hairstyle reference
-                handle_file(ref_path),   # Color reference (same as hairstyle)
-                api_name="/transfer"
-            )
+            # Try to discover the correct API endpoint
+            try:
+                # Print available endpoints for debugging
+                print(f"Available endpoints: {client.endpoints}")
+            except:
+                pass
+            
+            # Try different possible API names
+            api_names_to_try = ["/swap", "/predict", "/run", "/process", "/inference", "/transfer"]
+            
+            result = None
+            for api_name in api_names_to_try:
+                try:
+                    print(f"Trying API: {api_name}")
+                    result = client.predict(
+                        handle_file(src_path),   # Source face
+                        handle_file(ref_path),   # Hairstyle reference
+                        handle_file(ref_path),   # Color reference (same as hairstyle)
+                        api_name=api_name
+                    )
+                    print(f"Success with {api_name}!")
+                    break
+                except ValueError as ve:
+                    if "Cannot find a function" in str(ve):
+                        continue
+                    raise
+                except Exception as e:
+                    print(f"API {api_name} failed: {e}")
+                    continue
             
             print(f"HairFastGAN result: {result}")
             
             # Clean up temp files
-            import os
             os.unlink(src_path)
             os.unlink(ref_path)
             
             # Load result image
-            if result and os.path.exists(result):
-                with open(result, 'rb') as f:
-                    return f.read()
+            if result:
+                # Result could be a path or a tuple
+                result_path = result[0] if isinstance(result, (list, tuple)) else result
+                if os.path.exists(str(result_path)):
+                    with open(str(result_path), 'rb') as f:
+                        return f.read()
             
             return None
             
