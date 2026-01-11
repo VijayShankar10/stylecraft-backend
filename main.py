@@ -478,66 +478,77 @@ HAIRSTYLE_CATALOG = {
     "layered_bob": {
         "name": "Layered Bob",
         "prompt": "layered bob haircut, modern layered bob hairstyle, chin-length layers, voluminous bob",
-        "description": "Modern layered cut that adds volume and movement"
+        "description": "Modern layered cut that adds volume and movement",
+        "reference_url": "https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?w=512"
     },
     "textured_waves": {
         "name": "Textured Waves", 
         "prompt": "beach waves hairstyle, textured wavy hair, natural soft waves, medium length wavy hair",
-        "description": "Soft, natural-looking waves for a relaxed yet elegant look"
+        "description": "Soft, natural-looking waves for a relaxed yet elegant look",
+        "reference_url": "https://images.unsplash.com/photo-1580618672591-eb180b1a973f?w=512"
     },
     "curly_bob": {
         "name": "Curly Bob",
         "prompt": "curly bob hairstyle, bouncy curls bob haircut, short curly hair, ringlet curls",
-        "description": "Bouncy curls that bring life and texture to a classic bob"
+        "description": "Bouncy curls that bring life and texture to a classic bob",
+        "reference_url": "https://images.unsplash.com/photo-1595152772835-219674b2a8a6?w=512"
     },
     "classic_bob": {
         "name": "Classic Bob",
         "prompt": "classic straight bob, sleek bob haircut, blunt cut bob, professional bob hairstyle",
-        "description": "A timeless, straight-cut bob that works for any setting"
+        "description": "A timeless, straight-cut bob that works for any setting",
+        "reference_url": "https://images.unsplash.com/photo-1559563458-527698bf5295?w=512"
     },
     "side_swept": {
         "name": "Side Swept",
         "prompt": "side swept hairstyle, elegant side part hair, swept bangs, glamorous side style",
-        "description": "Elegant side-swept look that highlights facial features"
+        "description": "Elegant side-swept look that highlights facial features",
+        "reference_url": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=512"
     },
     "pixie_cut": {
         "name": "Pixie Cut",
         "prompt": "pixie cut hairstyle, short pixie haircut, chic pixie, edgy short hair",
-        "description": "A short, chic pixie cut for a bold and confident statement"
+        "description": "A short, chic pixie cut for a bold and confident statement",
+        "reference_url": "https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=512"
     },
     "voluminous_curls": {
         "name": "Voluminous Curls",
         "prompt": "voluminous curly hair, big bouncy curls, full curly hairstyle, glamorous curls",
-        "description": "Big, bouncy curls for a glamorous and bold look"
+        "description": "Big, bouncy curls for a glamorous and bold look",
+        "reference_url": "https://images.unsplash.com/photo-1580618672591-eb180b1a973f?w=512"
     },
     "sleek_straight": {
         "name": "Sleek Straight",
         "prompt": "sleek straight hair, pin straight hairstyle, glossy straight hair, smooth silky hair",
-        "description": "Perfectly smooth and sleek straight hairstyle"
+        "description": "Perfectly smooth and sleek straight hairstyle",
+        "reference_url": "https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=512"
     },
     "french_bob": {
         "name": "French Bob",
         "prompt": "french bob hairstyle, parisian bob, chin length bob with bangs, chic french haircut",
-        "description": "Classic French bob with subtle sophistication"
+        "description": "Classic French bob with subtle sophistication",
+        "reference_url": "https://images.unsplash.com/photo-1508214751196-bcfd4ca60f91?w=512"
     },
     "shaggy_layers": {
         "name": "Shaggy Layers",
         "prompt": "shaggy layered haircut, textured shag hairstyle, messy layers, modern shag cut",
-        "description": "Textured, effortlessly cool shaggy layers"
+        "description": "Textured, effortlessly cool shaggy layers",
+        "reference_url": "https://images.unsplash.com/photo-1580618672591-eb180b1a973f?w=512"
     }
 }
 
 
 async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: str):
     """
-    Apply hairstyle transformation to user's photo.
+    Transfer hairstyle from reference image to user's photo using HairFastGAN.
     
-    Uses aggressive local styling that:
-    1. Accurately segments the hair region using MediaPipe
-    2. Applies strong, visible color and texture changes
-    3. Creates dramatic hairstyle transformations
+    This creates a merged photo where:
+    1. The hairstyle from the reference image is extracted
+    2. Applied onto the user's photo
+    3. Result shows user with the selected hairstyle
     """
-    import cv2
+    import httpx
+    import tempfile
     
     print(f"Starting hairstyle transfer for: {hairstyle_id}")
     print(f"Image size: {len(source_image_bytes)} bytes")
@@ -551,45 +562,41 @@ async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: st
         return None, "Invalid image data"
     
     try:
-        # Load and prepare image
+        # Load and prepare source image
         pil_image = Image.open(io.BytesIO(source_image_bytes))
         pil_image = correct_image_orientation(pil_image)
         
-        # Keep reasonable size for processing
-        max_size = 800
+        # Resize for processing (HairFastGAN works best with ~512px)
+        max_size = 512
         if pil_image.width > max_size or pil_image.height > max_size:
             ratio = min(max_size / pil_image.width, max_size / pil_image.height)
             new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
             pil_image = pil_image.resize(new_size, Image.LANCZOS)
         
-        # Get accurate hair mask using MediaPipe
+        print(f"Source image prepared: {pil_image.size}")
+        
+        # Try HairFastGAN for real hairstyle transfer
+        result = await try_hairfastgan_with_reference(pil_image, hairstyle)
+        if result:
+            print("HairFastGAN transfer successful!")
+            return result, None
+        
+        # Fallback: Apply dramatic local styling
+        print("HairFastGAN failed, applying local hairstyle effect")
+        
+        # Get hair mask
         hair_mask = segment_hair_multiclass(pil_image)
         if hair_mask is None:
-            print("Hair segmentation failed, creating face-based mask")
             hair_mask = create_face_based_hair_mask(pil_image)
         
-        # Check if we have valid hair detected
-        hair_pixels = np.sum(hair_mask > 128)
-        total_pixels = hair_mask.shape[0] * hair_mask.shape[1]
-        hair_ratio = hair_pixels / total_pixels
-        print(f"Hair mask: {hair_mask.shape}, hair coverage: {hair_ratio:.2%}")
-        
-        if hair_ratio < 0.02:  # Less than 2% - barely any hair detected
-            print("Very little hair detected, using expanded mask")
-            hair_mask = create_face_based_hair_mask(pil_image)
-        
-        # Convert to numpy array
         img_rgb = np.array(pil_image.convert('RGB'))
-        
-        # Apply aggressive hairstyle transformation
         result = apply_dramatic_hairstyle(img_rgb, hair_mask, hairstyle_id, hairstyle)
         
-        # Convert result to bytes
         result_image = Image.fromarray(result)
         buffer = io.BytesIO()
         result_image.save(buffer, format="JPEG", quality=92)
         
-        print(f"Hairstyle applied successfully! Result: {len(buffer.getvalue())} bytes")
+        print(f"Local hairstyle applied: {len(buffer.getvalue())} bytes")
         return buffer.getvalue(), None
         
     except Exception as e:
@@ -597,6 +604,96 @@ async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: st
         import traceback
         traceback.print_exc()
         return None, f"Failed to apply hairstyle: {str(e)}"
+
+
+async def try_hairfastgan_with_reference(source_image, hairstyle: dict):
+    """
+    Use HairFastGAN via Hugging Face Spaces to transfer hairstyle.
+    HairFastGAN takes: source photo + reference hairstyle photo
+    And outputs: source photo with the reference hairstyle applied
+    """
+    import httpx
+    import tempfile
+    from gradio_client import Client, handle_file
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    
+    reference_url = hairstyle.get('reference_url')
+    if not reference_url:
+        print("No reference URL for hairstyle")
+        return None
+    
+    print(f"Using reference image: {reference_url}")
+    
+    def run_hairfastgan():
+        try:
+            # Download reference image
+            import requests
+            ref_response = requests.get(reference_url, timeout=30)
+            if ref_response.status_code != 200:
+                print(f"Failed to download reference: {ref_response.status_code}")
+                return None
+            
+            ref_image = Image.open(io.BytesIO(ref_response.content))
+            
+            # Save images to temp files
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as src_file:
+                source_image.save(src_file, format='PNG')
+                src_path = src_file.name
+            
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as ref_file:
+                ref_image.save(ref_file, format='PNG')
+                ref_path = ref_file.name
+            
+            print(f"Connecting to HairFastGAN...")
+            
+            # Connect to HairFastGAN on Hugging Face Spaces
+            client = Client("AIRI-Institute/HairFastGAN")
+            
+            # HairFastGAN expects: source_image, hairstyle_reference, color_reference
+            # We use the same reference for both hairstyle and color
+            result = client.predict(
+                handle_file(src_path),   # Source face
+                handle_file(ref_path),   # Hairstyle reference
+                handle_file(ref_path),   # Color reference (same as hairstyle)
+                api_name="/transfer"
+            )
+            
+            print(f"HairFastGAN result: {result}")
+            
+            # Clean up temp files
+            import os
+            os.unlink(src_path)
+            os.unlink(ref_path)
+            
+            # Load result image
+            if result and os.path.exists(result):
+                with open(result, 'rb') as f:
+                    return f.read()
+            
+            return None
+            
+        except Exception as e:
+            print(f"HairFastGAN error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    # Run in executor with timeout
+    try:
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(executor, run_hairfastgan),
+                timeout=120  # 2 minute timeout
+            )
+            return result
+    except asyncio.TimeoutError:
+        print("HairFastGAN timeout after 120 seconds")
+        return None
+    except Exception as e:
+        print(f"HairFastGAN executor error: {e}")
+        return None
 
 
 def create_face_based_hair_mask(pil_image):
