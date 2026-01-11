@@ -8,3 +8,4 @@ opencv-python-headless>=4.8.0
 gradio_client>=1.0.0
 httpx>=0.25.0
 aiofiles>=23.0.0
+requests>=2.31.0
