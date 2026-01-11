@@ -670,6 +670,7 @@ def apply_hairstyle_effect_local(source_image_bytes: bytes, hairstyle: dict):
     """
     Local fallback: Apply hair styling effects based on hairstyle type.
     Uses our existing hair segmentation to apply appropriate effects.
+    Always returns a result - falls back to simple enhancement if segmentation fails.
     """
     import cv2
     
@@ -677,13 +678,21 @@ def apply_hairstyle_effect_local(source_image_bytes: bytes, hairstyle: dict):
     pil_image = Image.open(io.BytesIO(source_image_bytes))
     pil_image = correct_image_orientation(pil_image)
     
-    # Get hair mask
+    # Get hair mask - with fallback
     try:
         hair_mask = segment_hair_multiclass(pil_image)
-        if hair_mask is None:
-            return None
-    except:
-        return None
+    except Exception as e:
+        print(f"Hair segmentation failed: {e}")
+        hair_mask = None
+    
+    # If segmentation failed, create a simple top-half mask as fallback
+    if hair_mask is None:
+        img_array = np.array(pil_image.convert('RGB'))
+        h, w = img_array.shape[:2]
+        hair_mask = np.zeros((h, w), dtype=np.uint8)
+        # Assume top 40% might be hair
+        hair_mask[:int(h * 0.4), :] = 255
+        print("Using fallback hair mask (top region)")
     
     # Apply hairstyle-specific effects
     hairstyle_id = None
@@ -695,18 +704,19 @@ def apply_hairstyle_effect_local(source_image_bytes: bytes, hairstyle: dict):
     img_rgb = np.array(pil_image.convert('RGB'))
     
     # Apply effects based on hairstyle type
-    if hairstyle_id in ['curly_bob', 'voluminous_curls']:
-        # Add slight texture/curl effect
-        result = apply_curl_texture(img_rgb, hair_mask)
-    elif hairstyle_id in ['sleek_straight', 'classic_bob']:
-        # Smooth and add shine
-        result = apply_sleek_effect(img_rgb, hair_mask)
-    elif hairstyle_id in ['textured_waves', 'shaggy_layers']:
-        # Add wave texture
-        result = apply_wave_texture(img_rgb, hair_mask)
-    else:
-        # Default: slight enhancement
-        result = apply_enhancement(img_rgb, hair_mask)
+    try:
+        if hairstyle_id in ['curly_bob', 'voluminous_curls']:
+            result = apply_curl_texture(img_rgb, hair_mask)
+        elif hairstyle_id in ['sleek_straight', 'classic_bob']:
+            result = apply_sleek_effect(img_rgb, hair_mask)
+        elif hairstyle_id in ['textured_waves', 'shaggy_layers']:
+            result = apply_wave_texture(img_rgb, hair_mask)
+        else:
+            result = apply_enhancement(img_rgb, hair_mask)
+    except Exception as e:
+        print(f"Effect application failed: {e}")
+        # Ultimate fallback - just enhance colors slightly
+        result = cv2.convertScaleAbs(img_rgb, alpha=1.1, beta=10)
     
     # Convert back to bytes
     result_image = Image.fromarray(result)
