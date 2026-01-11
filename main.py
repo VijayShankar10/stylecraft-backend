@@ -664,55 +664,74 @@ async def try_stable_hair_transfer(source_image_bytes: bytes, hairstyle: dict):
 
 def apply_hairstyle_effect_local(source_image_bytes: bytes, hairstyle: dict):
     """
-    Local fallback: Apply hair styling effects based on hairstyle type.
-    Uses our existing hair segmentation to apply appropriate effects.
-    Always returns a result - falls back to simple enhancement if segmentation fails.
+    Apply a hairstyle overlay to the user's photo.
+    This works like Snapchat filters - overlays a pre-styled hairstyle on top of the detected face.
     """
     import cv2
+    import mediapipe as mp
     
     # Load the source image
     pil_image = Image.open(io.BytesIO(source_image_bytes))
     pil_image = correct_image_orientation(pil_image)
+    img_rgb = np.array(pil_image.convert('RGB'))
     
-    # Get hair mask - with fallback
-    try:
-        hair_mask = segment_hair_multiclass(pil_image)
-    except Exception as e:
-        print(f"Hair segmentation failed: {e}")
-        hair_mask = None
-    
-    # If segmentation failed, create a simple top-half mask as fallback
-    if hair_mask is None:
-        img_array = np.array(pil_image.convert('RGB'))
-        h, w = img_array.shape[:2]
-        hair_mask = np.zeros((h, w), dtype=np.uint8)
-        # Assume top 40% might be hair
-        hair_mask[:int(h * 0.4), :] = 255
-        print("Using fallback hair mask (top region)")
-    
-    # Apply hairstyle-specific effects
+    # Get hairstyle ID
     hairstyle_id = None
     for hid, h in HAIRSTYLE_CATALOG.items():
         if h == hairstyle:
             hairstyle_id = hid
             break
     
-    img_rgb = np.array(pil_image.convert('RGB'))
+    print(f"Applying overlay hairstyle: {hairstyle_id}")
     
-    # Apply effects based on hairstyle type
-    try:
-        if hairstyle_id in ['curly_bob', 'voluminous_curls']:
-            result = apply_curl_texture(img_rgb, hair_mask)
-        elif hairstyle_id in ['sleek_straight', 'classic_bob']:
-            result = apply_sleek_effect(img_rgb, hair_mask)
-        elif hairstyle_id in ['textured_waves', 'shaggy_layers']:
-            result = apply_wave_texture(img_rgb, hair_mask)
-        else:
-            result = apply_enhancement(img_rgb, hair_mask)
-    except Exception as e:
-        print(f"Effect application failed: {e}")
-        # Ultimate fallback - just enhance colors slightly
-        result = cv2.convertScaleAbs(img_rgb, alpha=1.1, beta=10)
+    # Detect face landmarks for positioning
+    mp_face_mesh = mp.solutions.face_mesh
+    
+    with mp_face_mesh.FaceMesh(
+        static_image_mode=True,
+        max_num_faces=1,
+        min_detection_confidence=0.5
+    ) as face_mesh:
+        
+        results = face_mesh.process(img_rgb)
+        
+        if not results.multi_face_landmarks:
+            print("No face detected, using fallback enhancement")
+            # Fallback: apply visible hair enhancement
+            return apply_visible_hair_effect(img_rgb, hairstyle_id)
+        
+        # Get face landmarks
+        landmarks = results.multi_face_landmarks[0].landmark
+        h, w = img_rgb.shape[:2]
+        
+        # Key face points for hairstyle positioning
+        # Forehead top (approximate from hairline)
+        top_of_head_idx = 10  # Top of forehead
+        left_temple_idx = 54   # Left side of face
+        right_temple_idx = 284  # Right side of face
+        chin_idx = 152  # Chin bottom
+        
+        top_y = int(landmarks[top_of_head_idx].y * h)
+        left_x = int(landmarks[left_temple_idx].x * w)
+        right_x = int(landmarks[right_temple_idx].x * w)
+        chin_y = int(landmarks[chin_idx].y * h)
+        
+        # Calculate face dimensions
+        face_width = right_x - left_x
+        face_height = chin_y - top_y
+        face_center_x = (left_x + right_x) // 2
+        
+        print(f"Face detected: width={face_width}, height={face_height}, center_x={face_center_x}")
+        
+        # Apply the hairstyle overlay effect
+        result = apply_hairstyle_overlay(
+            img_rgb, 
+            hairstyle_id,
+            face_center_x,
+            top_y,
+            face_width,
+            face_height
+        )
     
     # Convert back to bytes
     result_image = Image.fromarray(result)
@@ -720,6 +739,340 @@ def apply_hairstyle_effect_local(source_image_bytes: bytes, hairstyle: dict):
     result_image.save(buffer, format="JPEG", quality=90)
     
     return buffer.getvalue()
+
+
+def apply_hairstyle_overlay(img_rgb: np.ndarray, hairstyle_id: str, 
+                            center_x: int, top_y: int, 
+                            face_width: int, face_height: int):
+    """
+    Apply a generated hairstyle overlay based on the hairstyle type.
+    Creates a stylized hair effect positioned over the user's head.
+    """
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy()
+    
+    # Calculate hairstyle dimensions (hair typically extends beyond face)
+    hair_width = int(face_width * 1.6)
+    hair_height = int(face_height * 0.7)  # Hair covers top portion
+    
+    # Position hairstyle above and around face
+    hair_top = max(0, top_y - int(hair_height * 0.4))  # Start above forehead
+    hair_left = max(0, center_x - hair_width // 2)
+    hair_right = min(w, center_x + hair_width // 2)
+    
+    # Create the hairstyle based on type
+    hairstyle_colors = {
+        'curly_bob': (45, 30, 20),       # Dark brown curly
+        'textured_waves': (60, 45, 35),   # Medium brown waves
+        'layered_bob': (40, 25, 15),      # Dark layered
+        'classic_bob': (35, 25, 18),      # Classic dark
+        'side_swept': (55, 40, 30),       # Side swept brown
+        'pixie_cut': (30, 20, 12),        # Dark pixie
+        'voluminous_curls': (65, 55, 45), # Light brown curls
+        'sleek_straight': (25, 18, 10),   # Black sleek
+        'french_bob': (45, 35, 25),       # French bob
+        'shaggy_layers': (70, 55, 40)     # Light shaggy
+    }
+    
+    base_color = hairstyle_colors.get(hairstyle_id, (40, 30, 20))
+    
+    # Get existing hair mask for better blending
+    try:
+        pil_img = Image.fromarray(img_rgb)
+        hair_mask = segment_hair_multiclass(pil_img)
+        if hair_mask is None:
+            hair_mask = create_approximate_hair_mask(img_rgb, center_x, top_y, face_width, hair_height)
+    except:
+        hair_mask = create_approximate_hair_mask(img_rgb, center_x, top_y, face_width, hair_height)
+    
+    # Apply hairstyle effect based on style type
+    if hairstyle_id in ['curly_bob', 'voluminous_curls']:
+        result = apply_curly_overlay(result, hair_mask, base_color, hairstyle_id)
+    elif hairstyle_id in ['textured_waves', 'shaggy_layers']:
+        result = apply_wavy_overlay(result, hair_mask, base_color, hairstyle_id)
+    elif hairstyle_id in ['sleek_straight', 'classic_bob']:
+        result = apply_sleek_overlay(result, hair_mask, base_color, hairstyle_id)
+    elif hairstyle_id == 'pixie_cut':
+        result = apply_pixie_overlay(result, hair_mask, base_color)
+    elif hairstyle_id == 'side_swept':
+        result = apply_side_swept_overlay(result, hair_mask, base_color)
+    else:
+        result = apply_default_overlay(result, hair_mask, base_color)
+    
+    return result
+
+
+def create_approximate_hair_mask(img_rgb: np.ndarray, center_x: int, top_y: int, 
+                                  face_width: int, hair_height: int):
+    """Create an approximate hair region mask based on face position."""
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    
+    # Create elliptical mask for hair region
+    hair_width = int(face_width * 1.5)
+    ellipse_center = (center_x, max(0, top_y - 20))
+    axes = (hair_width // 2, int(hair_height * 0.8))
+    
+    cv2.ellipse(mask, ellipse_center, axes, 0, 0, 360, 255, -1)
+    
+    # Blur for soft edges
+    mask = cv2.GaussianBlur(mask, (31, 31), 0)
+    
+    return mask
+
+
+def apply_curly_overlay(img_rgb: np.ndarray, hair_mask: np.ndarray, 
+                        base_color: tuple, style: str):
+    """Apply curly hair effect with visible texture."""
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy()
+    
+    # Normalize mask
+    mask_norm = hair_mask.astype(np.float32) / 255.0
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create curly texture pattern
+    texture = np.zeros((h, w), dtype=np.float32)
+    
+    # Add multiple frequency curl patterns
+    for freq in [15, 25, 40]:
+        x_pattern = np.sin(np.linspace(0, freq * np.pi, w)) * 0.5 + 0.5
+        y_pattern = np.cos(np.linspace(0, freq * np.pi, h)) * 0.5 + 0.5
+        curl_pattern = np.outer(y_pattern, x_pattern)
+        texture += curl_pattern * (1.0 / freq * 15)
+    
+    texture = cv2.GaussianBlur(texture, (5, 5), 0)
+    texture = (texture - texture.min()) / (texture.max() - texture.min() + 1e-6)
+    
+    # Create styled hair color
+    styled_hair = np.zeros_like(img_rgb, dtype=np.float32)
+    for c in range(3):
+        styled_hair[:, :, c] = base_color[c] * (0.7 + 0.6 * texture)
+    
+    # Add highlights based on original brightness
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    highlights = gray * 50
+    styled_hair += np.stack([highlights] * 3, axis=-1)
+    
+    # Blend with original based on mask
+    blend_factor = mask_3ch * 0.85
+    result = result.astype(np.float32) * (1 - blend_factor) + styled_hair * blend_factor
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def apply_wavy_overlay(img_rgb: np.ndarray, hair_mask: np.ndarray,
+                       base_color: tuple, style: str):
+    """Apply wavy/textured hair effect."""
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy()
+    
+    mask_norm = hair_mask.astype(np.float32) / 255.0
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create wave pattern
+    y_coords = np.linspace(0, 8 * np.pi, h)
+    wave_offset = np.sin(y_coords) * 10
+    
+    texture = np.zeros((h, w), dtype=np.float32)
+    for i in range(h):
+        shift = int(wave_offset[i])
+        row = np.sin(np.linspace(0, 6 * np.pi, w) + i * 0.1) * 0.5 + 0.5
+        texture[i] = np.roll(row, shift)
+    
+    texture = cv2.GaussianBlur(texture, (7, 7), 0)
+    
+    # Create styled hair
+    styled_hair = np.zeros_like(img_rgb, dtype=np.float32)
+    for c in range(3):
+        styled_hair[:, :, c] = base_color[c] * (0.6 + 0.8 * texture)
+    
+    # Add natural variation
+    noise = np.random.normal(0, 10, styled_hair.shape)
+    styled_hair += noise
+    
+    # Blend
+    blend_factor = mask_3ch * 0.8
+    result = result.astype(np.float32) * (1 - blend_factor) + styled_hair * blend_factor
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def apply_sleek_overlay(img_rgb: np.ndarray, hair_mask: np.ndarray,
+                        base_color: tuple, style: str):
+    """Apply sleek/straight hair effect."""
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy()
+    
+    mask_norm = hair_mask.astype(np.float32) / 255.0
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create smooth gradient for sleek look
+    y_gradient = np.linspace(0.7, 1.3, h).reshape(-1, 1)
+    x_gradient = np.linspace(0.9, 1.1, w).reshape(1, -1)
+    gradient = y_gradient * x_gradient
+    
+    # Create styled hair with shine
+    styled_hair = np.zeros_like(img_rgb, dtype=np.float32)
+    for c in range(3):
+        styled_hair[:, :, c] = base_color[c] * gradient
+    
+    # Add shine streak
+    shine_x = w // 3
+    shine_width = w // 4
+    shine = np.zeros((h, w), dtype=np.float32)
+    shine[:, max(0, shine_x):min(w, shine_x + shine_width)] = 40
+    shine = cv2.GaussianBlur(shine, (51, 51), 0)
+    styled_hair += np.stack([shine] * 3, axis=-1)
+    
+    # Blend
+    blend_factor = mask_3ch * 0.85
+    result = result.astype(np.float32) * (1 - blend_factor) + styled_hair * blend_factor
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def apply_pixie_overlay(img_rgb: np.ndarray, hair_mask: np.ndarray, base_color: tuple):
+    """Apply pixie cut effect - shorter hair coverage."""
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy()
+    
+    # Reduce mask for shorter hair
+    kernel = np.ones((15, 15), np.uint8)
+    short_mask = cv2.erode(hair_mask, kernel, iterations=2)
+    short_mask = cv2.GaussianBlur(short_mask, (21, 21), 0)
+    
+    mask_norm = short_mask.astype(np.float32) / 255.0
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create textured short hair
+    texture = np.random.uniform(0.8, 1.2, (h, w))
+    texture = cv2.GaussianBlur(texture.astype(np.float32), (5, 5), 0)
+    
+    styled_hair = np.zeros_like(img_rgb, dtype=np.float32)
+    for c in range(3):
+        styled_hair[:, :, c] = base_color[c] * texture
+    
+    blend_factor = mask_3ch * 0.85
+    result = result.astype(np.float32) * (1 - blend_factor) + styled_hair * blend_factor
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def apply_side_swept_overlay(img_rgb: np.ndarray, hair_mask: np.ndarray, base_color: tuple):
+    """Apply side-swept hairstyle effect."""
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy()
+    
+    mask_norm = hair_mask.astype(np.float32) / 255.0
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create diagonal sweep pattern
+    x_coords = np.linspace(0, 1, w)
+    y_coords = np.linspace(0, 1, h)
+    xx, yy = np.meshgrid(x_coords, y_coords)
+    sweep = (xx + yy * 0.5) % 1.0
+    sweep = cv2.GaussianBlur(sweep.astype(np.float32), (15, 15), 0)
+    
+    styled_hair = np.zeros_like(img_rgb, dtype=np.float32)
+    for c in range(3):
+        styled_hair[:, :, c] = base_color[c] * (0.6 + 0.8 * sweep)
+    
+    blend_factor = mask_3ch * 0.85
+    result = result.astype(np.float32) * (1 - blend_factor) + styled_hair * blend_factor
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def apply_default_overlay(img_rgb: np.ndarray, hair_mask: np.ndarray, base_color: tuple):
+    """Apply default styled hair overlay."""
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy()
+    
+    mask_norm = hair_mask.astype(np.float32) / 255.0
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create basic styled hair
+    styled_hair = np.zeros_like(img_rgb, dtype=np.float32)
+    for c in range(3):
+        styled_hair[:, :, c] = base_color[c]
+    
+    # Add some texture
+    texture = np.random.uniform(0.9, 1.1, (h, w))
+    texture = cv2.GaussianBlur(texture.astype(np.float32), (9, 9), 0)
+    styled_hair *= np.stack([texture] * 3, axis=-1)
+    
+    blend_factor = mask_3ch * 0.8
+    result = result.astype(np.float32) * (1 - blend_factor) + styled_hair * blend_factor
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def apply_visible_hair_effect(img_rgb: np.ndarray, hairstyle_id: str):
+    """Fallback when face detection fails - apply strong visible effect."""
+    import cv2
+    
+    h, w = img_rgb.shape[:2]
+    
+    # Try to get hair mask
+    try:
+        pil_img = Image.fromarray(img_rgb)
+        hair_mask = segment_hair_multiclass(pil_img)
+    except:
+        hair_mask = None
+    
+    if hair_mask is None:
+        # Create top-portion mask as fallback
+        hair_mask = np.zeros((h, w), dtype=np.uint8)
+        hair_mask[:int(h * 0.45), :] = 255
+        hair_mask = cv2.GaussianBlur(hair_mask, (51, 51), 0)
+    
+    # Get color for this style
+    colors = {
+        'curly_bob': (50, 35, 25),
+        'textured_waves': (65, 50, 40),
+        'layered_bob': (45, 30, 20),
+        'sleek_straight': (25, 18, 10),
+        'side_swept': (55, 40, 30),
+        'pixie_cut': (35, 25, 15),
+        'voluminous_curls': (70, 55, 45),
+        'classic_bob': (40, 30, 20),
+        'french_bob': (50, 40, 30),
+        'shaggy_layers': (75, 60, 45)
+    }
+    
+    base_color = colors.get(hairstyle_id, (45, 35, 25))
+    
+    mask_norm = hair_mask.astype(np.float32) / 255.0
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create styled hair with texture
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    texture = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    styled_hair = np.zeros_like(img_rgb, dtype=np.float32)
+    for c in range(3):
+        styled_hair[:, :, c] = base_color[c] * (0.6 + 0.8 * texture)
+    
+    result = img_rgb.astype(np.float32) * (1 - mask_3ch * 0.85) + styled_hair * mask_3ch * 0.85
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
 
 
 def apply_curl_texture(img_rgb: np.ndarray, hair_mask: np.ndarray):
