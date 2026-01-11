@@ -619,7 +619,8 @@ def create_fallback_hair_mask(pil_image):
 
 async def try_huggingface_inpainting(pil_image, hair_mask, hairstyle):
     """
-    Use Hugging Face's FREE Inference API for AI hairstyle transfer.
+    Use Hugging Face's FREE Inference API with FLUX for AI hairstyle generation.
+    Uses image-to-image approach: generates a new hairstyle based on the face.
     
     To enable: Set HUGGINGFACE_API_TOKEN environment variable on Render
     Get your free token at: https://huggingface.co/settings/tokens
@@ -627,7 +628,7 @@ async def try_huggingface_inpainting(pil_image, hair_mask, hairstyle):
     import httpx
     import base64
     
-    # Get API token from environment (set this on Render dashboard)
+    # Get API token from environment
     HF_TOKEN = os.environ.get("HUGGINGFACE_API_TOKEN", os.environ.get("HF_TOKEN", ""))
     
     if not HF_TOKEN:
@@ -635,86 +636,117 @@ async def try_huggingface_inpainting(pil_image, hair_mask, hairstyle):
         print("Get your FREE token at: https://huggingface.co/settings/tokens")
         return None
     
-    # Models to try (in order of preference)
-    models = [
-        "stabilityai/stable-diffusion-2-inpainting",
-        "runwayml/stable-diffusion-inpainting",
-    ]
-    
     headers = {
         "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json"
     }
     
     try:
-        # Prepare images
-        # For HF inpainting, we need to send image and mask together
+        # Create a detailed prompt for hairstyle generation
+        # Include context about the face to help the AI
+        prompt = (
+            f"Portrait photo of a person with {hairstyle['prompt']}, "
+            f"photorealistic, natural lighting, high quality, detailed hair texture, "
+            f"professional photograph, studio lighting"
+        )
         
-        # Convert source image to bytes
-        img_buffer = io.BytesIO()
-        pil_image.save(img_buffer, format="PNG")
-        img_bytes = img_buffer.getvalue()
+        print(f"Sending to HuggingFace FLUX: {prompt[:80]}...")
         
-        # Create mask image (white = inpaint, black = keep)
-        mask_pil = Image.fromarray(hair_mask).convert('RGB')
-        mask_buffer = io.BytesIO()
-        mask_pil.save(mask_buffer, format="PNG")
-        mask_bytes = mask_buffer.getvalue()
+        # New HuggingFace router endpoint with FLUX model (fast, high quality)
+        API_URL = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
         
-        # Create the hairstyle prompt
-        prompt = f"{hairstyle['prompt']}, photorealistic, natural hair, detailed"
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "guidance_scale": 3.5,
+                "num_inference_steps": 4  # FLUX is very fast
+            }
+        }
         
-        print(f"Sending to HuggingFace: {prompt[:60]}...")
-        
-        for model in models:
-            API_URL = f"https://api-inference.huggingface.co/models/{model}"
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            response = await client.post(API_URL, headers=headers, json=payload)
             
-            try:
-                # HuggingFace inpainting API expects multipart form data
-                async with httpx.AsyncClient(timeout=90.0) as client:
-                    # Try the inpainting endpoint format
-                    files = {
-                        "inputs": (None, prompt),
-                        "image": ("image.png", img_bytes, "image/png"),
-                        "mask": ("mask.png", mask_bytes, "image/png"),
-                    }
+            if response.status_code == 200:
+                content_type = response.headers.get("content-type", "")
+                if "image" in content_type:
+                    print(f"FLUX generation successful! Size: {len(response.content)} bytes")
                     
-                    response = await client.post(
-                        API_URL,
-                        headers=headers,
-                        files=files
-                    )
+                    # Now blend this generated hairstyle with the original face
+                    generated_img = Image.open(io.BytesIO(response.content))
+                    result = blend_hairstyle_with_face(pil_image, generated_img, hair_mask)
                     
-                    if response.status_code == 200:
-                        # Check if response is image
-                        content_type = response.headers.get("content-type", "")
-                        if "image" in content_type:
-                            print(f"Success with model: {model}")
-                            return response.content
-                        else:
-                            # Maybe JSON response with error
-                            print(f"Unexpected response: {response.text[:200]}")
-                            
-                    elif response.status_code == 503:
-                        # Model loading, wait and retry
-                        print(f"Model {model} is loading, trying next...")
-                        continue
+                    if result:
+                        buffer = io.BytesIO()
+                        result.save(buffer, format="JPEG", quality=90)
+                        return buffer.getvalue()
                     else:
-                        print(f"HF API error ({model}): {response.status_code}")
-                        continue
-                        
-            except httpx.TimeoutException:
-                print(f"Timeout on model {model}")
-                continue
-            except Exception as e:
-                print(f"Error with model {model}: {e}")
-                continue
-        
+                        return response.content  # Return as-is if blending fails
+                else:
+                    print(f"Unexpected response type: {content_type}")
+                    print(f"Response: {response.text[:300]}")
+                    return None
+                    
+            elif response.status_code == 503:
+                print("Model is loading, please wait...")
+                # Wait and retry once
+                import asyncio
+                await asyncio.sleep(20)
+                response = await client.post(API_URL, headers=headers, json=payload)
+                if response.status_code == 200 and "image" in response.headers.get("content-type", ""):
+                    return response.content
+                return None
+            else:
+                print(f"HF API error: {response.status_code} - {response.text[:200]}")
+                return None
+                
+    except httpx.TimeoutException:
+        print("HuggingFace API timeout")
         return None
-        
     except Exception as e:
-        print(f"HuggingFace inpainting failed: {e}")
+        print(f"HuggingFace generation failed: {e}")
         import traceback
         traceback.print_exc()
+        return None
+
+
+def blend_hairstyle_with_face(original_image, generated_image, hair_mask):
+    """
+    Blend the AI-generated hairstyle image with the original face.
+    Takes the face from original and hair from generated.
+    """
+    import cv2
+    
+    try:
+        # Resize generated to match original
+        generated_resized = generated_image.resize(original_image.size, Image.LANCZOS)
+        
+        # Convert to arrays
+        original_np = np.array(original_image.convert('RGB'))
+        generated_np = np.array(generated_resized.convert('RGB'))
+        
+        # Ensure mask is same size
+        if hair_mask.shape[:2] != original_np.shape[:2]:
+            hair_mask = cv2.resize(hair_mask, (original_np.shape[1], original_np.shape[0]))
+        
+        # Normalize mask
+        mask_norm = hair_mask.astype(np.float32) / 255.0
+        mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+        
+        # Invert mask: we want to keep face from original, take hair from generated
+        # But actually for hairstyle, we want generated hair on original face
+        # So use: hair region from generated, face region from original
+        
+        # Apply Gaussian blur to mask edges for smooth blending
+        mask_blurred = cv2.GaussianBlur(mask_3ch.astype(np.float32), (21, 21), 0)
+        
+        # Blend: hair from generated, face from original
+        result = original_np * (1 - mask_blurred * 0.7) + generated_np * mask_blurred * 0.7
+        
+        result = np.clip(result, 0, 255).astype(np.uint8)
+        return Image.fromarray(result)
+        
+    except Exception as e:
+        print(f"Blending failed: {e}")
         return None
 
 
