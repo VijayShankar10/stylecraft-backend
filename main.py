@@ -529,42 +529,327 @@ HAIRSTYLE_CATALOG = {
 
 async def transfer_hairstyle_with_ai(source_image_bytes: bytes, hairstyle_id: str):
     """
-    Transfer hairstyle using local processing.
-    External AI APIs (HairFastGAN, Stable-Hair) are too slow/unreliable,
-    so we use fast local hair enhancement as the primary method.
-    """
-    import os
-    import tempfile
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
+    Transfer hairstyle using AI inpainting via Hugging Face Inference API (FREE).
     
-    print(f"Starting hairstyle transfer for: {hairstyle_id}")
+    Process:
+    1. Segment the hair region to create a mask
+    2. Send image + mask + hairstyle prompt to Stable Diffusion Inpainting
+    3. AI regenerates the hair region with the new hairstyle
+    """
+    import httpx
+    import base64
+    import asyncio
+    
+    print(f"Starting AI hairstyle transfer for: {hairstyle_id}")
     print(f"Image size: {len(source_image_bytes)} bytes")
     
     hairstyle = HAIRSTYLE_CATALOG.get(hairstyle_id)
     if not hairstyle:
         return None, f"Unknown hairstyle ID: {hairstyle_id}"
     
-    # Validate image bytes
+    # Validate image
     if not source_image_bytes or len(source_image_bytes) < 100:
-        return None, "Invalid image data received"
+        return None, "Invalid image data"
     
-    # Use fast local processing (primary method)
-    # This applies hair enhancement effects based on the selected style
+    # Step 1: Get hair mask for inpainting
     try:
-        print(f"Applying local processing for style: {hairstyle['name']}")
-        result = apply_hairstyle_effect_local(source_image_bytes, hairstyle)
-        if result:
-            print(f"Success! Result size: {len(result)} bytes")
-            return result, None
-        else:
-            print("Local processing returned None")
+        pil_image = Image.open(io.BytesIO(source_image_bytes))
+        pil_image = correct_image_orientation(pil_image)
+        
+        # Resize for faster processing (max 512x512 for SD)
+        max_size = 512
+        if pil_image.width > max_size or pil_image.height > max_size:
+            ratio = min(max_size / pil_image.width, max_size / pil_image.height)
+            new_size = (int(pil_image.width * ratio), int(pil_image.height * ratio))
+            pil_image = pil_image.resize(new_size, Image.LANCZOS)
+        
+        # Get hair mask
+        hair_mask = segment_hair_multiclass(pil_image)
+        if hair_mask is None:
+            print("Hair segmentation failed, creating approximate mask")
+            hair_mask = create_fallback_hair_mask(pil_image)
+        
+        print(f"Hair mask created: {hair_mask.shape}")
+        
     except Exception as e:
+        print(f"Image preparation failed: {e}")
         import traceback
-        print(f"Local processing failed: {e}")
         traceback.print_exc()
+        return None, "Failed to process image"
     
-    return None, "Failed to apply hairstyle. Please try again."
+    # Step 2: Try Hugging Face Inpainting API
+    result = await try_huggingface_inpainting(pil_image, hair_mask, hairstyle)
+    if result:
+        print("HuggingFace inpainting successful!")
+        return result, None
+    
+    # Step 3: Fallback to Replicate API
+    result = await try_replicate_inpainting(pil_image, hair_mask, hairstyle)
+    if result:
+        print("Replicate inpainting successful!")
+        return result, None
+    
+    # Step 4: Final fallback - apply visible color/style effect locally
+    print("AI APIs failed, applying local visible effect")
+    result = apply_local_hairstyle_effect(np.array(pil_image.convert('RGB')), hair_mask, hairstyle_id)
+    if result is not None:
+        result_img = Image.fromarray(result)
+        buffer = io.BytesIO()
+        result_img.save(buffer, format="JPEG", quality=90)
+        return buffer.getvalue(), None
+    
+    return None, "All hairstyle transfer methods failed. Please try again."
+
+
+def create_fallback_hair_mask(pil_image):
+    """Create a fallback hair mask when segmentation fails."""
+    import cv2
+    
+    w, h = pil_image.size
+    mask = np.zeros((h, w), dtype=np.uint8)
+    
+    # Assume top 40% of image contains hair
+    mask[:int(h * 0.4), :] = 255
+    
+    # Apply gradient for smoother blending
+    mask = cv2.GaussianBlur(mask, (51, 51), 0)
+    
+    return mask
+
+
+async def try_huggingface_inpainting(pil_image, hair_mask, hairstyle):
+    """
+    Use Hugging Face's FREE Inference API for Stable Diffusion Inpainting.
+    Free tier: ~1000 requests/day
+    """
+    import httpx
+    import base64
+    
+    # Hugging Face Inference API endpoint for inpainting
+    API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-inpainting"
+    
+    # You can use without API key for limited requests, or add your free HF token
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        # Convert image to base64
+        img_buffer = io.BytesIO()
+        pil_image.save(img_buffer, format="PNG")
+        img_base64 = base64.b64encode(img_buffer.getvalue()).decode()
+        
+        # Convert mask to base64 (white = inpaint, black = keep)
+        mask_img = Image.fromarray(hair_mask)
+        mask_buffer = io.BytesIO()
+        mask_img.save(mask_buffer, format="PNG")
+        mask_base64 = base64.b64encode(mask_buffer.getvalue()).decode()
+        
+        # Create the inpainting prompt
+        prompt = f"{hairstyle['prompt']}, professional photo, highly detailed, natural lighting"
+        
+        print(f"Sending to HuggingFace with prompt: {prompt[:50]}...")
+        
+        payload = {
+            "inputs": {
+                "image": img_base64,
+                "mask": mask_base64,
+                "prompt": prompt,
+                "negative_prompt": "blurry, distorted, ugly, low quality, bad hair"
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(API_URL, headers=headers, json=payload)
+            
+            if response.status_code == 200:
+                # Response is the image bytes directly
+                return response.content
+            else:
+                print(f"HuggingFace API error: {response.status_code} - {response.text[:200]}")
+                return None
+                
+    except Exception as e:
+        print(f"HuggingFace inpainting failed: {e}")
+        return None
+
+
+async def try_replicate_inpainting(pil_image, hair_mask, hairstyle):
+    """
+    Try Replicate's free tier for inpainting.
+    """
+    import httpx
+    import base64
+    
+    # Replicate requires API key, skip if not available
+    REPLICATE_API_KEY = os.environ.get("REPLICATE_API_TOKEN", "")
+    if not REPLICATE_API_KEY:
+        print("No Replicate API key, skipping")
+        return None
+    
+    try:
+        # Convert to base64 data URIs
+        img_buffer = io.BytesIO()
+        pil_image.save(img_buffer, format="PNG")
+        img_base64 = f"data:image/png;base64,{base64.b64encode(img_buffer.getvalue()).decode()}"
+        
+        mask_img = Image.fromarray(hair_mask)
+        mask_buffer = io.BytesIO()
+        mask_img.save(mask_buffer, format="PNG")
+        mask_base64 = f"data:image/png;base64,{base64.b64encode(mask_buffer.getvalue()).decode()}"
+        
+        headers = {
+            "Authorization": f"Token {REPLICATE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "version": "c11bac58203367db93a3c552bd49a25a5418458ddffb7e90dae55780765e26d6",  # SD inpainting
+            "input": {
+                "image": img_base64,
+                "mask": mask_base64,
+                "prompt": hairstyle['prompt'],
+                "num_outputs": 1
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # Start the prediction
+            response = await client.post(
+                "https://api.replicate.com/v1/predictions",
+                headers=headers,
+                json=payload
+            )
+            
+            if response.status_code != 201:
+                print(f"Replicate start error: {response.status_code}")
+                return None
+            
+            prediction = response.json()
+            get_url = prediction.get("urls", {}).get("get")
+            
+            if not get_url:
+                return None
+            
+            # Poll for result
+            for _ in range(30):
+                await asyncio.sleep(2)
+                result_response = await client.get(get_url, headers=headers)
+                result = result_response.json()
+                
+                if result.get("status") == "succeeded":
+                    output_url = result.get("output", [None])[0]
+                    if output_url:
+                        img_response = await client.get(output_url)
+                        return img_response.content
+                elif result.get("status") == "failed":
+                    print(f"Replicate failed: {result.get('error')}")
+                    return None
+            
+            return None
+            
+    except Exception as e:
+        print(f"Replicate inpainting failed: {e}")
+        return None
+
+
+def apply_local_hairstyle_effect(img_rgb: np.ndarray, hair_mask: np.ndarray, hairstyle_id: str):
+    """
+    Apply a strong visible local effect as fallback when AI APIs fail.
+    This changes hair color and texture noticeably.
+    """
+    import cv2
+    
+    # Hairstyle color definitions (more dramatic colors for visibility)
+    hairstyle_colors = {
+        'curly_bob': {'color': (60, 40, 25), 'texture': 'curly'},
+        'textured_waves': {'color': (80, 55, 35), 'texture': 'wavy'},
+        'layered_bob': {'color': (50, 35, 20), 'texture': 'layered'},
+        'classic_bob': {'color': (40, 28, 18), 'texture': 'smooth'},
+        'side_swept': {'color': (70, 50, 32), 'texture': 'swept'},
+        'pixie_cut': {'color': (35, 25, 15), 'texture': 'short'},
+        'voluminous_curls': {'color': (90, 65, 45), 'texture': 'curly'},
+        'sleek_straight': {'color': (25, 18, 10), 'texture': 'sleek'},
+        'french_bob': {'color': (55, 40, 28), 'texture': 'bob'},
+        'shaggy_layers': {'color': (85, 60, 40), 'texture': 'shaggy'}
+    }
+    
+    style_config = hairstyle_colors.get(hairstyle_id, {'color': (50, 35, 25), 'texture': 'default'})
+    base_color = style_config['color']
+    texture_type = style_config['texture']
+    
+    h, w = img_rgb.shape[:2]
+    result = img_rgb.copy().astype(np.float32)
+    
+    # Normalize mask
+    mask_norm = hair_mask.astype(np.float32) / 255.0
+    mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+    
+    # Create styled hair based on texture type
+    styled_hair = create_textured_hair(h, w, base_color, texture_type)
+    
+    # Preserve some original detail for realism
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    detail = cv2.Laplacian(gray, cv2.CV_32F)
+    detail = cv2.GaussianBlur(detail, (3, 3), 0)
+    
+    # Add detail to styled hair
+    styled_hair += np.stack([detail * 30] * 3, axis=-1)
+    
+    # Strong blend (90%) for very visible change
+    blend_strength = 0.90
+    result = result * (1 - mask_3ch * blend_strength) + styled_hair * mask_3ch * blend_strength
+    
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def create_textured_hair(h: int, w: int, base_color: tuple, texture_type: str):
+    """Create textured hair based on style type."""
+    import cv2
+    
+    styled_hair = np.zeros((h, w, 3), dtype=np.float32)
+    
+    if texture_type == 'curly':
+        # Multiple frequency curl patterns
+        for freq in [12, 20, 30]:
+            x_pattern = np.sin(np.linspace(0, freq * np.pi, w)) * 0.5 + 0.5
+            y_pattern = np.cos(np.linspace(0, freq * np.pi, h)) * 0.5 + 0.5
+            texture = np.outer(y_pattern, x_pattern)
+            for c in range(3):
+                styled_hair[:, :, c] += base_color[c] * texture * 0.4
+        styled_hair = cv2.GaussianBlur(styled_hair.astype(np.float32), (5, 5), 0)
+        
+    elif texture_type == 'wavy':
+        y_coords = np.linspace(0, 6 * np.pi, h)
+        for i in range(h):
+            wave = np.sin(np.linspace(0, 4 * np.pi, w) + y_coords[i]) * 0.4 + 0.6
+            for c in range(3):
+                styled_hair[i, :, c] = base_color[c] * wave
+        styled_hair = cv2.GaussianBlur(styled_hair.astype(np.float32), (7, 7), 0)
+        
+    elif texture_type == 'sleek':
+        # Smooth gradient with shine
+        y_grad = np.linspace(0.6, 1.2, h).reshape(-1, 1)
+        shine = np.zeros((h, w), dtype=np.float32)
+        shine[:, w//3:w//2] = 0.3
+        shine = cv2.GaussianBlur(shine, (41, 41), 0)
+        for c in range(3):
+            styled_hair[:, :, c] = base_color[c] * y_grad + shine * 40
+            
+    elif texture_type == 'short' or texture_type == 'pixie':
+        texture = np.random.uniform(0.7, 1.3, (h, w))
+        texture = cv2.GaussianBlur(texture.astype(np.float32), (5, 5), 0)
+        for c in range(3):
+            styled_hair[:, :, c] = base_color[c] * texture
+            
+    else:
+        # Default: smooth with subtle texture
+        texture = np.random.uniform(0.85, 1.15, (h, w))
+        texture = cv2.GaussianBlur(texture.astype(np.float32), (9, 9), 0)
+        for c in range(3):
+            styled_hair[:, :, c] = base_color[c] * texture
+    
+    return styled_hair
 
 
 async def try_hairfastgan_transfer(source_image_bytes: bytes, hairstyle: dict):
