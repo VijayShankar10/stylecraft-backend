@@ -808,71 +808,73 @@ def apply_dramatic_hairstyle(img_rgb: np.ndarray, hair_mask: np.ndarray,
     h, w = img_rgb.shape[:2]
     result = img_rgb.copy().astype(np.float32)
     
-    # Hairstyle definitions with dramatic colors and textures
+    # MORE DRAMATIC hairstyle colors - clearly visible changes
     hairstyle_configs = {
         'curly_bob': {
-            'base_color': (50, 35, 25),      # Rich dark brown
-            'highlight_color': (90, 70, 50),  # Golden highlights
+            'base_color': (139, 90, 43),      # Chocolate brown - VERY visible
+            'highlight_color': (180, 130, 80),# Bright golden highlights
             'texture': 'curly',
-            'color_intensity': 0.85
+            'color_intensity': 0.92
         },
         'textured_waves': {
-            'base_color': (70, 50, 35),       # Warm brown
-            'highlight_color': (110, 85, 60), # Honey highlights
+            'base_color': (165, 113, 78),     # Warm caramel
+            'highlight_color': (205, 160, 110),# Honey blonde highlights
             'texture': 'wavy',
-            'color_intensity': 0.80
-        },
-        'layered_bob': {
-            'base_color': (40, 28, 18),       # Dark chocolate
-            'highlight_color': (70, 50, 35),  # Subtle highlights
-            'texture': 'layered',
-            'color_intensity': 0.82
-        },
-        'classic_bob': {
-            'base_color': (30, 22, 15),       # Deep brown
-            'highlight_color': (55, 40, 28),  # Natural highlights
-            'texture': 'smooth',
-            'color_intensity': 0.85
-        },
-        'side_swept': {
-            'base_color': (55, 40, 28),       # Medium brown
-            'highlight_color': (85, 65, 45),  # Caramel highlights
-            'texture': 'swept',
-            'color_intensity': 0.78
-        },
-        'pixie_cut': {
-            'base_color': (35, 25, 18),       # Dark brown
-            'highlight_color': (60, 45, 32),  # Subtle shine
-            'texture': 'short',
-            'color_intensity': 0.88
-        },
-        'voluminous_curls': {
-            'base_color': (80, 55, 40),       # Warm auburn
-            'highlight_color': (120, 90, 65), # Copper highlights
-            'texture': 'curly',
-            'color_intensity': 0.82
-        },
-        'sleek_straight': {
-            'base_color': (20, 15, 10),       # Jet black
-            'highlight_color': (40, 30, 22),  # Blue-black shine
-            'texture': 'sleek',
             'color_intensity': 0.90
         },
-        'french_bob': {
-            'base_color': (45, 32, 22),       # Elegant brown
-            'highlight_color': (75, 55, 40),  # Soft highlights
+        'layered_bob': {
+            'base_color': (101, 67, 33),      # Dark chocolate
+            'highlight_color': (150, 100, 60),# Bronze highlights
+            'texture': 'layered',
+            'color_intensity': 0.88
+        },
+        'classic_bob': {
+            'base_color': (60, 40, 25),       # Deep espresso
+            'highlight_color': (100, 70, 45), # Mocha highlights
             'texture': 'smooth',
-            'color_intensity': 0.83
+            'color_intensity': 0.90
+        },
+        'side_swept': {
+            'base_color': (150, 100, 60),     # Golden brown
+            'highlight_color': (190, 145, 95),# Buttery highlights
+            'texture': 'swept',
+            'color_intensity': 0.85
+        },
+        'pixie_cut': {
+            'base_color': (80, 50, 30),       # Rich brown
+            'highlight_color': (130, 90, 55), # Warm highlights
+            'texture': 'short',
+            'color_intensity': 0.92
+        },
+        'voluminous_curls': {
+            'base_color': (180, 100, 60),     # Auburn/copper
+            'highlight_color': (220, 150, 90),# Bright copper highlights
+            'texture': 'curly',
+            'color_intensity': 0.88
+        },
+        'sleek_straight': {
+            'base_color': (30, 20, 15),       # Jet black
+            'highlight_color': (60, 45, 35),  # Blue-black shine
+            'texture': 'sleek',
+            'color_intensity': 0.95
+        },
+        'french_bob': {
+            'base_color': (120, 75, 45),      # Chestnut
+            'highlight_color': (170, 120, 75),# Warm chestnut highlights
+            'texture': 'smooth',
+            'color_intensity': 0.88
         },
         'shaggy_layers': {
-            'base_color': (85, 60, 42),       # Light brown
-            'highlight_color': (130, 100, 70),# Sun-kissed highlights
+            'base_color': (185, 130, 85),     # Light brown/dirty blonde
+            'highlight_color': (220, 180, 130),# Sun-kissed highlights
             'texture': 'shaggy',
-            'color_intensity': 0.75
+            'color_intensity': 0.82
         }
     }
     
     config = hairstyle_configs.get(hairstyle_id, hairstyle_configs['classic_bob'])
+    
+    print(f"Applying hairstyle: {hairstyle_id}, color: {config['base_color']}, intensity: {config['color_intensity']}")
     
     # Ensure mask is proper size
     if hair_mask.shape[:2] != img_rgb.shape[:2]:
